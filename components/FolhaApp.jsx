@@ -106,6 +106,9 @@ const CHALLENGES_EN=[
 
 async function sGet(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch{return null;}}
 async function sSet(k,v){try{if(v===null){localStorage.removeItem(k);}else{localStorage.setItem(k,JSON.stringify(v));}}catch{}}
+function uKey(uid,k){return `${uid}__${k}`;}
+async function uGet(uid,k){return sGet(uKey(uid,k));}
+async function uSet(uid,k,v){return sSet(uKey(uid,k),v);}
 
 async function callClaude(system,msg,maxTok=1500){
   const res=await fetch("/api/ai",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({system,message:msg,maxTokens:maxTok})});
@@ -400,7 +403,7 @@ function BookSearchModal({onSelect,onClose,title}){
   const [q,setQ]=useState(""),[results,setResults]=useState(null),[loading,setLoading]=useState(false);
   const search=async()=>{
     if(!q.trim()||loading)return;setLoading(true);
-    try{const text=await callClaude(`Return JSON ONLY: {"books":[{"title":"...","author":"...","year":"...","genre":"...","pages":300}]}. 10 books matching search. No markdown.`,`Search: "${q}"`,800);const m=text.match(/\{[\s\S]*\}/);if(m)setResults(JSON.parse(m[0]).books||[]);}catch{}finally{setLoading(false);}
+    try{const text=await callClaude(`You are a book database. The user will give a search query. Return ONLY a raw JSON object (no markdown, no backticks, no explanation) in this exact format: {"books":[{"title":"Book Title","author":"Author Name","year":"2001","genre":"Fiction","pages":300}]}. Return exactly 8 books that best match the query.`,`Search query: "${q}"`,900);const clean=text.replace(/```json|```/g,"").trim();const m=clean.match(/\{[\s\S]*\}/);if(m)setResults(JSON.parse(m[0]).books||[]);}catch{}finally{setLoading(false);}
   };
   return(
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:24}} onClick={onClose}>
@@ -596,28 +599,43 @@ function SocialTab({user,profile,library,finished,wishlist,reading,followers,fol
   );
 }
 
-function DiscoverTab({library,onRate,onAddToWish,onStartReading,toast$}){
+function DiscoverTab({library,onRate,onAddToWish,onStartReading,toast$,uid}){
   const {t,lang}=useLang();
   const [query,setQuery]=useState(""),[mood,setMood]=useState(null);
   const [loading,setLoading]=useState(false),[results,setResults]=useState(null);
   const [error,setError]=useState(null),[startModal,setStartModal]=useState(null),[pages,setPages]=useState("");
   const [lovePending,setLovePending]=useState(null),[loveText,setLoveText]=useState(""),[loveLoading,setLoveLoading]=useState(false);
+  const [history,setHistory]=useState([]);
+  const [histResults,setHistResults]=useState({});
   const inputRef=useRef(null);
   useEffect(()=>{inputRef.current?.focus();},[]);
+  useEffect(()=>{if(uid)uGet(uid,"discover_history").then(h=>{if(h)setHistory(h);});if(uid)uGet(uid,"discover_hist_results").then(r=>{if(r)setHistResults(r);});},[uid]);
   const MOODS_=[{id:"adventure",label:lang==="pt"?"Aventura":"Adventure",icon:"⚔️"},{id:"thoughtful",label:lang==="pt"?"Reflexivo":"Thoughtful",icon:"🌙"},{id:"cozy",label:lang==="pt"?"Aconchegante":"Cozy",icon:"☕"},{id:"dark",label:lang==="pt"?"Sombrio":"Dark",icon:"🌑"},{id:"romantic",label:lang==="pt"?"Romântico":"Romantic",icon:"🌹"},{id:"funny",label:lang==="pt"?"Divertido":"Funny",icon:"😄"}];
-  const doSearch=async()=>{
-    if((!query.trim()&&!mood)||loading)return;
+  const saveToHistory=(q,mood,books)=>{
+    const label=[q,mood?MOODS_.find(m=>m.id===mood)?.icon:""].filter(Boolean).join(" ").trim();
+    if(!label)return;
+    const entry={label,query:q,mood,date:Date.now()};
+    setHistory(p=>{const filtered=p.filter(h=>h.label!==label);const n=[entry,...filtered].slice(0,5);uSet(uid,"discover_history",n);return n;});
+    setHistResults(p=>{const n={...p,[label]:books};uSet(uid,"discover_hist_results",n);return n;});
+  };
+  const doSearch=async(overrideQuery,overrideMood)=>{
+    const q_=overrideQuery!==undefined?overrideQuery:query;
+    const mood_=overrideMood!==undefined?overrideMood:mood;
+    if((!q_.trim()&&!mood_)||loading)return;
     setLoading(true);setResults(null);setError(null);
     const loved=library.filter(b=>b.rating==="loved").map(b=>b.title).slice(0,8);
     const disliked=library.filter(b=>b.rating==="disliked").map(b=>b.title).slice(0,5);
-    const msg=[query.trim()?`Book: "${query.trim()}"`:null,mood?`Mood: ${MOODS_.find(m=>m.id===mood)?.label}`:null,loved.length?`Loved: ${loved.join(", ")}`:null,disliked.length?`Avoid similar to: ${disliked.join(", ")}`:null].filter(Boolean).join("\n");
+    const msg=[q_.trim()?`Book: "${q_.trim()}"`:null,mood_?`Mood: ${MOODS_.find(m=>m.id===mood_)?.label}`:null,loved.length?`Loved: ${loved.join(", ")}`:null,disliked.length?`Avoid similar to: ${disliked.join(", ")}`:null].filter(Boolean).join("\n");
     const isPt=lang==="pt";
     try{
       const sysPrompt=isPt?`Especialista literário. Retorne 10 recomendações ordenadas por match. JSON APENAS:\n{"books":[{"title":"...","author":"...","year":"...","genre":"...","pages":320,"reason":"2-3 frases em português","tag":"Mesmo Autor|Mesmo Gênero|Tema Similar|Estilo Similar|Mesma Época|Por Humor","match":85,"series":null,"seriesOrder":null,"seriesTotal":null}]}`:`Literary expert. Return 10 recommendations sorted by match. JSON ONLY:\n{"books":[{"title":"...","author":"...","year":"...","genre":"...","pages":320,"reason":"2-3 sentences in English","tag":"Same Author|Same Genre|Similar Theme|Similar Style|Same Era|By Mood","match":85,"series":null,"seriesOrder":null,"seriesTotal":null}]}`;
       const text=await callClaude(sysPrompt,msg,2000);
-      const m=text.match(/\{[\s\S]*\}/);
+      const clean=text.replace(/```json|```/g,"").trim();
+      const m=clean.match(/\{[\s\S]*\}/);
       if(!m){setError(isPt?"Tente novamente.":"Try again.");return;}
-      setResults((JSON.parse(m[0]).books||[]).sort((a,b)=>(b.match||0)-(a.match||0)));
+      const books=(JSON.parse(m[0]).books||[]).sort((a,b)=>(b.match||0)-(a.match||0));
+      setResults(books);
+      saveToHistory(q_,mood_,books);
     }catch(e){setError(e.message);}finally{setLoading(false);}
   };
   const doLove=async(book)=>{
@@ -643,10 +661,23 @@ function DiscoverTab({library,onRate,onAddToWish,onStartReading,toast$}){
       <div className="fu" style={{animationDelay:".13s",marginBottom:28}}>
         <div style={{display:"flex",background:C.surface,border:`1px solid ${C.border}`}}>
           <input ref={inputRef} type="text" placeholder={mood?(lang==="pt"?"Livro de referência (opcional)":"Reference book (optional)"):(lang==="pt"?"ex: Duna, Dom Quixote…":"e.g. Dune, Don Quixote…")} value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doSearch()} style={{flex:1,padding:"15px 18px",background:"transparent",border:"none",outline:"none",color:C.text,fontFamily:"'Cormorant Garamond',serif",fontSize:17,fontStyle:"italic"}}/>
-          <button onClick={doSearch} disabled={loading||(!query.trim()&&!mood)} style={{padding:"0 22px",background:C.accent,border:"none",color:"#0F0D0B",fontFamily:"'Jost',sans-serif",fontSize:10,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",cursor:"pointer",opacity:(loading||(!query.trim()&&!mood))?0.4:1,minWidth:90}}>{loading?<Dots/>:(lang==="pt"?"Buscar":"Search")}</button>
+          <button onClick={()=>doSearch()} disabled={loading||(!query.trim()&&!mood)} style={{padding:"0 22px",background:C.accent,border:"none",color:"#0F0D0B",fontFamily:"'Jost',sans-serif",fontSize:10,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",cursor:"pointer",opacity:(loading||(!query.trim()&&!mood))?0.4:1,minWidth:90}}>{loading?<Dots/>:(lang==="pt"?"Buscar":"Search")}</button>
         </div>
       </div>
       {error&&<p style={{color:C.red,fontSize:12,marginBottom:14,fontStyle:"italic"}}>{error}</p>}
+      {history.length>0&&!results&&!loading&&(
+        <div className="fu" style={{animationDelay:".16s",marginBottom:24}}>
+          <p style={{fontSize:10,letterSpacing:"2.5px",textTransform:"uppercase",color:C.textDim,marginBottom:10}}>🕐 {lang==="pt"?"Pesquisas recentes":"Recent searches"}</p>
+          <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+            {history.map((h,i)=>(
+              <button key={i} onClick={()=>{setQuery(h.query||"");setMood(h.mood||null);const saved=histResults[h.label];if(saved){setResults(saved);}else{doSearch(h.query||"",h.mood||null);}}} style={{padding:"7px 13px",border:`1px solid ${C.border}`,background:C.surface,color:C.textDim,cursor:"pointer",fontFamily:"'Jost',sans-serif",fontSize:11,display:"flex",alignItems:"center",gap:6,transition:"all .15s"}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.accent;e.currentTarget.style.color=C.accent;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;e.currentTarget.style.color=C.textDim;}}>
+                <span style={{fontSize:13}}>🕐</span>{h.label}
+                <button onClick={ev=>{ev.stopPropagation();setHistory(p=>{const n=p.filter((_,j)=>j!==i);uSet(uid,"discover_history",n);return n;});}} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:14,lineHeight:1,padding:"0 0 0 4px"}}>×</button>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {results&&(
         <div className="fi">
           <div style={{display:"flex",alignItems:"baseline",gap:12,marginBottom:18,paddingBottom:12,borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:10,letterSpacing:"3px",textTransform:"uppercase",color:C.muted}}>{lang==="pt"?"Ordenado por compatibilidade":"Sorted by compatibility"}</span></div>
@@ -715,19 +746,21 @@ function MainApp({user,onLogout}){
   const [toast,setToast]=useState(null);
   const [ready,setReady]=useState(false);
 
+  const uid=user?.uid||"guest";
+
   useEffect(()=>{
-    Promise.all([sGet("folha_lib"),sGet("folha_reading"),sGet("folha_finished"),sGet("folha_notes"),sGet("folha_wishlist"),sGet(`folha_goal_${yr}`),sGet("folha_profile"),sGet("folha_ai_analysis"),sGet("folha_challenges"),sGet("folha_followers"),sGet("folha_following")])
+    Promise.all([uGet(uid,"lib"),uGet(uid,"reading"),uGet(uid,"finished"),uGet(uid,"notes"),uGet(uid,"wishlist"),uGet(uid,`goal_${yr}`),uGet(uid,"profile"),uGet(uid,"ai_analysis"),uGet(uid,"challenges"),uGet(uid,"followers"),uGet(uid,"following")])
     .then(([lib,rd,fin,nt,wl,gl,pr,ai,ch,fol,foing])=>{
       if(lib)setLibrary(lib);if(rd)setReading(rd);if(fin)setFinished(fin);
       if(nt)setNotes(nt);if(wl)setWishlist(wl);if(gl)setGoal(gl);if(pr)setProfile(pr);
       if(ai)setAiAnalysis(ai);if(ch)setChallenges(ch);if(fol)setFollowers(fol);if(foing)setFollowing(foing);
       setReady(true);
     });
-  },[]);
+  },[uid]);
 
   const toast$=useCallback((m)=>{setToast(m);setTimeout(()=>setToast(null),2800);},[]);
-  const updLib=useCallback((fn)=>{setLibrary(p=>{const n=fn(p);sSet("folha_lib",n);return n;});},[]);
-  const updWish=useCallback((fn)=>{setWishlist(p=>{const n=fn(p);sSet("folha_wishlist",n);return n;});},[]);
+  const updLib=useCallback((fn)=>{setLibrary(p=>{const n=fn(p);uSet(uid,"lib",n);return n;});},[uid]);
+  const updWish=useCallback((fn)=>{setWishlist(p=>{const n=fn(p);uSet(uid,"wishlist",n);return n;});},[uid]);
 
   const rateBook=useCallback((book,rating)=>{
     updLib(p=>{const e=p.find(b=>b.title===book.title);if(e&&e.rating===rating){toast$(lang==="pt"?"↩ Avaliação removida":"↩ Rating removed");return p.map(b=>b.title===book.title?{...b,rating:null}:b);}return e?p.map(b=>b.title===book.title?{...b,rating}:b):[{...book,rating,addedAt:Date.now()},...p];});
@@ -735,21 +768,21 @@ function MainApp({user,onLogout}){
   },[updLib,library,toast$,lang]);
 
   const addToWish=useCallback((book)=>{updWish(p=>{if(p.find(b=>b.title===book.title)){toast$(lang==="pt"?"Já na lista":"Already in list");return p;}return[{...book,priority:"media",addedAt:Date.now()},...p];});toast$("🎯 "+t.bookAdded);},[updWish,toast$,t,lang]);
-  const startReading=useCallback((book,totalPages)=>{setReading(p=>{if(p.find(r=>r.book.title===book.title))return p;const n=[{book,pages:0,totalPages:parseInt(totalPages)||300,startDate:Date.now()},...p];sSet("folha_reading",n);return n;});toast$("📖 "+(lang==="pt"?"Adicionado a Lendo":"Added to Reading"));},[toast$,lang]);
-  const updateProgress=useCallback((title,pages)=>{setReading(p=>{const n=p.map(r=>r.book.title===title?{...r,pages:Math.min(parseInt(pages)||0,r.totalPages)}:r);sSet("folha_reading",n);return n;});},[]);
-  const finishBook=useCallback((r)=>{setReading(p=>{const n=p.filter(x=>x.book.title!==r.book.title);sSet("folha_reading",n);return n;});setFinished(p=>{const n=[{...r,finishedAt:Date.now()},...p];sSet("folha_finished",n);return n;});setGoal(p=>{const n={...p,done:p.done+1};sSet(`folha_goal_${yr}`,n);return n;});toast$("🎉 "+(lang==="pt"?"Livro concluído!":"Book finished!"));},[toast$,lang]);
-  const addNote=useCallback((bookTitle,type,text)=>{if(!text.trim())return;setNotes(p=>{const n={...p,[bookTitle]:[{type,text,date:Date.now()},...(p[bookTitle]||[])]};sSet("folha_notes",n);return n;});toast$(type==="quote"?"💬":"📝");},[toast$]);
-  const deleteNote=useCallback((bookTitle,idx)=>{setNotes(p=>{const arr=[...(p[bookTitle]||[])];arr.splice(idx,1);const n={...p,[bookTitle]:arr};sSet("folha_notes",n);return n;});},[]);
-  const saveProfile=useCallback(async(data)=>{const loved=library.filter(b=>b.rating==="loved");const p={...data,booksRead:finished.length,loved:loved.slice(0,20),updatedAt:Date.now()};setProfile(p);sSet("folha_profile",p);toast$(t.profileSaved);},[library,finished,toast$,t]);
-  const refreshAi=useCallback(async(mode,lang="pt")=>{const loved=library.filter(b=>b.rating==="loved");const books=mode==="last5"?loved.slice(0,5):loved;if(!books.length)return;const isPt=lang==="pt";const sysPrompt=isPt?`Retorne JSON APENAS:\n{"profile":"2-3 frases sobre o DNA literário deste leitor em português","recs":[{"title":"...","author":"...","reason":"1-2 frases personalizadas em português"}]}`:`Return JSON ONLY:\n{"profile":"2-3 sentences about this reader's literary DNA in English","recs":[{"title":"...","author":"...","reason":"1-2 personalized sentences in English"}]}`;const userMsg=isPt?`Livros amados: ${books.map(b=>`"${b.title}"`).join(", ")}\n\nRecomende 6 livros. Responda em português.`:`Books loved: ${books.map(b=>`"${b.title}"`).join(", ")}\n\nRecommend 6 books. Respond in English.`;try{const text=await callClaude(sysPrompt,userMsg,1200);const m=text.match(/\{[\s\S]*\}/);if(m){const ai=JSON.parse(m[0]);setAiAnalysis(ai);sSet("folha_ai_analysis",ai);}}catch{}},[library]);
-  const joinChallenge=useCallback((ch)=>{setChallenges(p=>{const n=[...p.filter(c=>c.id!==ch.id),{...ch,joined:true,joinedAt:Date.now()}];sSet("folha_challenges",n);return n;});toast$(lang==="pt"?"🎯 Desafio iniciado!":"🎯 Challenge started!");},[toast$,lang]);
-  const completeChallenge=useCallback((ch)=>{setChallenges(p=>{const n=p.map(c=>c.id===ch.id?{...c,completed:true,completedAt:Date.now()}:c);sSet("folha_challenges",n);return n;});toast$(`${ch.badge} ${lang==="pt"?"Selo conquistado!":"Badge earned!"}`);},[toast$,lang]);
-  const followUser=useCallback((username)=>{setFollowing(p=>{const n=[...new Set([...p,username])];sSet("folha_following",n);return n;});toast$(`✓ ${lang==="pt"?"Seguindo":"Following"} @${username}`);},[toast$,lang]);
-  const unfollowUser=useCallback((username)=>{setFollowing(p=>{const n=p.filter(u=>u!==username);sSet("folha_following",n);return n;});toast$(`${lang==="pt"?"Deixou de seguir":"Unfollowed"} @${username}`);},[toast$,lang]);
+  const startReading=useCallback((book,totalPages)=>{setReading(p=>{if(p.find(r=>r.book.title===book.title))return p;const n=[{book,pages:0,totalPages:parseInt(totalPages)||300,startDate:Date.now()},...p];uSet(uid,"reading",n);return n;});toast$("📖 "+(lang==="pt"?"Adicionado a Lendo":"Added to Reading"));},[uid,toast$,lang]);
+  const updateProgress=useCallback((title,pages)=>{setReading(p=>{const n=p.map(r=>r.book.title===title?{...r,pages:Math.min(parseInt(pages)||0,r.totalPages)}:r);uSet(uid,"reading",n);return n;});},[uid]);
+  const finishBook=useCallback((r)=>{setReading(p=>{const n=p.filter(x=>x.book.title!==r.book.title);uSet(uid,"reading",n);return n;});setFinished(p=>{const n=[{...r,finishedAt:Date.now()},...p];uSet(uid,"finished",n);return n;});setGoal(p=>{const n={...p,done:p.done+1};uSet(uid,`goal_${yr}`,n);return n;});toast$("🎉 "+(lang==="pt"?"Livro concluído!":"Book finished!"));},[uid,toast$,lang]);
+  const addNote=useCallback((bookTitle,type,text)=>{if(!text.trim())return;setNotes(p=>{const n={...p,[bookTitle]:[{type,text,date:Date.now()},...(p[bookTitle]||[])]};uSet(uid,"notes",n);return n;});toast$(type==="quote"?"💬":"📝");},[uid,toast$]);
+  const deleteNote=useCallback((bookTitle,idx)=>{setNotes(p=>{const arr=[...(p[bookTitle]||[])];arr.splice(idx,1);const n={...p,[bookTitle]:arr};uSet(uid,"notes",n);return n;});},[uid]);
+  const saveProfile=useCallback(async(data)=>{const loved=library.filter(b=>b.rating==="loved");const p={...data,booksRead:finished.length,loved:loved.slice(0,20),updatedAt:Date.now()};setProfile(p);uSet(uid,"profile",p);toast$(t.profileSaved);},[uid,library,finished,toast$,t]);
+  const refreshAi=useCallback(async(mode,lang="pt")=>{const loved=library.filter(b=>b.rating==="loved");const books=mode==="last5"?loved.slice(0,5):loved;if(!books.length)return;const isPt=lang==="pt";const sysPrompt=isPt?`Retorne JSON APENAS:\n{"profile":"2-3 frases sobre o DNA literário deste leitor em português","recs":[{"title":"...","author":"...","reason":"1-2 frases personalizadas em português"}]}`:`Return JSON ONLY:\n{"profile":"2-3 sentences about this reader's literary DNA in English","recs":[{"title":"...","author":"...","reason":"1-2 personalized sentences in English"}]}`;const userMsg=isPt?`Livros amados: ${books.map(b=>`"${b.title}"`).join(", ")}\n\nRecomende 6 livros. Responda em português.`:`Books loved: ${books.map(b=>`"${b.title}"`).join(", ")}\n\nRecommend 6 books. Respond in English.`;try{const text=await callClaude(sysPrompt,userMsg,1200);const m=text.match(/\{[\s\S]*\}/);if(m){const ai=JSON.parse(m[0]);setAiAnalysis(ai);uSet(uid,"ai_analysis",ai);}}catch{}},[uid,library]);
+  const joinChallenge=useCallback((ch)=>{setChallenges(p=>{const n=[...p.filter(c=>c.id!==ch.id),{...ch,joined:true,joinedAt:Date.now()}];uSet(uid,"challenges",n);return n;});toast$(lang==="pt"?"🎯 Desafio iniciado!":"🎯 Challenge started!");},[uid,toast$,lang]);
+  const completeChallenge=useCallback((ch)=>{setChallenges(p=>{const n=p.map(c=>c.id===ch.id?{...c,completed:true,completedAt:Date.now()}:c);uSet(uid,"challenges",n);return n;});toast$(`${ch.badge} ${lang==="pt"?"Selo conquistado!":"Badge earned!"}`);},[uid,toast$,lang]);
+  const followUser=useCallback((username)=>{setFollowing(p=>{const n=[...new Set([...p,username])];uSet(uid,"following",n);return n;});toast$(`✓ ${lang==="pt"?"Seguindo":"Following"} @${username}`);},[uid,toast$,lang]);
+  const unfollowUser=useCallback((username)=>{setFollowing(p=>{const n=p.filter(u=>u!==username);uSet(uid,"following",n);return n;});toast$(`${lang==="pt"?"Deixou de seguir":"Unfollowed"} @${username}`);},[uid,toast$,lang]);
 
   const TABS=[{id:"home",label:t.home,icon:"🏠"},{id:"discover",label:t.discover,icon:"🔍"},{id:"shelf",label:t.shelf,icon:"📚"},{id:"reading",label:t.reading,icon:"📖"},{id:"timeline",label:t.timeline,icon:"📅"},{id:"challenges",label:t.challenges,icon:"🏅"},{id:"notes",label:t.notes,icon:"✏️"},{id:"wishlist",label:t.wishlist,icon:"🎯"},{id:"social",label:t.social,icon:"👥"}];
 
-  const P={library,reading,finished,notes,wishlist,goal,profile,aiAnalysis,challenges,followers,following,onRate:rateBook,onAddToWish:addToWish,onStartReading:startReading,onProgress:updateProgress,onFinish:finishBook,onAddNote:addNote,onDeleteNote:deleteNote,onGoalChange:g=>{setGoal(g);sSet(`folha_goal_${yr}`,g);},onSaveProfile:saveProfile,onUpdLib:updLib,onUpdWish:updWish,onRefreshAi:refreshAi,onJoinChallenge:joinChallenge,onCompleteChallenge:completeChallenge,onFollow:followUser,onUnfollow:unfollowUser,user,toast$};
+  const P={library,reading,finished,notes,wishlist,goal,profile,aiAnalysis,challenges,followers,following,onRate:rateBook,onAddToWish:addToWish,onStartReading:startReading,onProgress:updateProgress,onFinish:finishBook,onAddNote:addNote,onDeleteNote:deleteNote,onGoalChange:g=>{setGoal(g);uSet(uid,`goal_${yr}`,g);},onSaveProfile:saveProfile,onUpdLib:updLib,onUpdWish:updWish,onRefreshAi:refreshAi,onJoinChallenge:joinChallenge,onCompleteChallenge:completeChallenge,onFollow:followUser,onUnfollow:unfollowUser,user,uid,toast$};
 
   if(!ready)return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg}}><Dots/></div>;
 
